@@ -1,0 +1,198 @@
+anchors:
+  configure-aws-access: &configure-aws-access
+    run:
+      name: Configure AWS access
+      command: |
+        mkdir -p ~/.aws
+        file=~/.aws/credentials
+        echo "[default]" > $file
+        echo "aws_access_key_id = $AWS_ACCESS_KEY_ID" >> $file
+        echo "aws_secret_access_key = $AWS_SECRET_ACCESS_KEY" >> $file
+  configure-build-environment: &configure-build-environment
+    run:
+      name: Configure
+      command: |
+        echo "REACT_APP_BASE_URL = $REACT_APP_BASE_URL" > ~/.env
+        npm install .
+        cd ./infrastructure
+        npm install .
+        cd ../
+        sudo npm install -g @aws-amplify/cli
+        amplify pull --appId $AMPLIFY_APPID --envName $AMPLIFY_ENV_NAME --frontend "{\"frontend\":\"javascript\",\"framework\":\"react\",\"config\":{\"SourceDir\":\"src\"}\}" --yes
+        ls -l
+        # amplify pull --amplify "{\\"projectName\":\"loanlaunchapped82073e\",\\"appId\":\"d1zc68zf8su5u7\",\\"envName\":\"dev\",\\"defaultEditor\":\"code\"\}" --providers "{\\"configLevel\":\"project\",\\"useProfile\":false,\\"profileName\":\"default\",\\"accessKeyId\":\"$AWS_ACCESS_KEY_ID\",\\"secretAccessKey\":\"$AWS_SECRET_ACCESS_KEY\",\\"region\":\"ca-central-1\"\}" --yes
+
+
+        
+  configure-run-build: &configure-run-build
+    run:
+      name: Configure
+      command: |
+        cd ./
+        npm run build
+        cd ./infrastructure
+        npm run build
+  configure-robots-file: &configure-robots-file
+    run:
+      name: Remove Robots File
+      command: |
+        rm ./build/robots.txt
+        cp -r ./build/robots/robots.txt ./build/robots.txt
+        rm ./build/robots/robots.txt
+        rmdir ./build/robots
+  #run-tests: &run-tests
+  #  run:
+  #    name: Test
+  #    command: |
+  #      npm run test
+  cache-dependencies: &cache-dependencies
+    save_cache:
+      key: dependency-cache-{{ checksum "package.json" }}
+      paths:
+        - ./node_modules
+  load-dependency-cache: &load-dependency-cache
+    restore_cache:
+      key: dependency-cache-{{ checksum "package.json" }}
+
+version: 2.1
+orbs:
+  aws-s3: circleci/aws-s3@2.0.0
+
+executors:
+  default:
+    docker:
+      - image: circleci/node:14.15.4
+
+jobs:
+  build:
+    executor: default
+    steps:
+      - checkout
+      - *load-dependency-cache
+      #- *configure-npmrc-access
+      - *configure-build-environment
+      - *cache-dependencies
+      #- *run-tests
+      - *configure-run-build
+      - persist_to_workspace:
+          root: .
+          paths:
+            - build
+
+  deploy:
+    executor: default
+    steps:
+      - checkout
+      - *load-dependency-cache
+      #- *configure-npmrc-access
+      - *configure-build-environment
+      - *configure-aws-access
+      #- *run-tests
+      - *configure-run-build
+      - run:
+          name: Deploy
+          command: |
+            cd ./infrastructure
+            ENV=$ENV npm run deploy
+          no_output_timeout: 30m
+
+  buildProd:
+    executor: default
+    steps:
+      - checkout
+      - *load-dependency-cache
+      #- *configure-npmrc-access
+      - *configure-build-environment
+      - *cache-dependencies
+      #- *run-tests
+      - *configure-run-build
+      - *configure-robots-file
+      - persist_to_workspace:
+          root: .
+          paths:
+            - build
+
+  deployProd:
+    executor: default
+    steps:
+      - checkout
+      - *load-dependency-cache
+      #- *configure-npmrc-access
+      - *configure-build-environment
+      - *configure-aws-access
+      #- *run-tests
+      - *configure-run-build
+      - *configure-robots-file
+      - run:
+          name: Deploy
+          command: |
+            cd ./infrastructure
+            ENV=$ENV npm run deploy
+          no_output_timeout: 30m
+
+workflows:
+  version: 2
+  ci-dev:
+    jobs:
+      - build:
+          context: loanlauch-dev
+          filters:
+            branches:
+              only:
+                - main
+      - deploy:
+          context: loanlauch-dev
+          filters:
+            branches:
+              only:
+                - main
+          requires:
+            - build
+  ci-staging:
+    jobs:
+      - build:
+          context: loanlaunch-staging
+          filters:
+            tags:
+              only:
+                - /^QA-v(\d+\.)?(\d+\.)?(\*|\d+)$/
+            branches:
+              ignore: /.*/
+      - deploy:
+          context: loanlaunch-staging
+          filters:
+            tags:
+              only:
+                - /^QA-v(\d+\.)?(\d+\.)?(\*|\d+)$/
+            branches:
+              ignore: /.*/
+          requires:
+            - build
+  ci-prod-build-deploy:
+    jobs:
+      - buildProd:
+          context: loanlaunch-prod
+          filters:
+            tags:
+              only:
+                - /^v(\d+\.)?(\d+\.)?(\*|\d+)$/
+            branches:
+              ignore: /.*/
+      - approve-deploy:
+          type: approval
+          filters:
+            tags:
+              only:
+                - /^v(\d+\.)?(\d+\.)?(\*|\d+)$/
+          requires:
+            - buildProd
+      - deployProd:
+          context: loanlaunch-prod
+          filters:
+            tags:
+              only:
+                - /^v(\d+\.)?(\d+\.)?(\*|\d+)$/
+            branches:
+              ignore: /.*/
+          requires:
+            - approve-deploy
